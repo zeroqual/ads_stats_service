@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest  
     steps:
       - uses: actions/checkout@v5
-.
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -35,10 +35,10 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v8
         with:
-          # Потом поставь сюда ту же версию, что у тебя локально (например v2.x.y).
+
           version: 2.15.0
 
-  # --- Сборка Docker-образа -------------------------------------------------
+
   docker-build:
     needs: [test, lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
