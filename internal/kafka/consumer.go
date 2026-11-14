@@ -25,6 +25,8 @@ func NewConsumer(ctx context.Context, brokers []string, topic string, groupID st
 		kgo.ConsumerGroup(groupID),
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+
+		kgo.BlockRebalanceOnPoll(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to client for consumer: %w", err)
@@ -44,19 +46,17 @@ func NewConsumer(ctx context.Context, brokers []string, topic string, groupID st
 func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
 	for {
 		fetches := c.client.PollFetches(ctx)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
 		if fetches.IsClientClosed() {
 			return nil, ErrClosed
 		}
 
-		for _, err := range fetches.Errors() {
-			slog.Error("consume",
-				slog.String("topic", err.Topic),
-				slog.Int("partition", int(err.Partition)),
-				slog.Any("error", err.Err),
-			)
+		for _, fe := range fetches.Errors() {
+
+			if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
+				continue
+			}
+			slog.Error("fetch", slog.String("topic", fe.Topic),
+				slog.Int("partition", int(fe.Partition)), slog.Any("err", fe.Err))
 		}
 
 		events := make([]event.Event, 0, len(fetches.Records()))
@@ -81,6 +81,9 @@ func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
 		if len(events) > 0 {
 			return events, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 }
 
@@ -93,6 +96,11 @@ func (c *Consumer) Commit(ctx context.Context) error {
 }
 
 func (c *Consumer) Close() error {
-	c.client.Close()
+	c.client.CloseAllowingRebalance()
 	return nil
+}
+
+// разрешаем ребаланс, только когда буфер пуст
+func (c *Consumer) AllowRebalance() {
+	c.client.AllowRebalance()
 }

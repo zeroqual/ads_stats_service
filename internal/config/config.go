@@ -90,6 +90,9 @@ func (c Ingester) Validate() error {
 	if c.FlushInterval <= 0 {
 		errs = append(errs, errors.New("BATCH_FLUSH_INTERVAL must be > 0"))
 	}
+	if c.ClickHouse.Address == "" {
+		errs = append(errs, errors.New("CLICKHOUSE_ADDR is empty"))
+	}
 	return errors.Join(errs...)
 }
 
