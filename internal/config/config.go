@@ -27,9 +27,11 @@ type ClickHouse struct {
 
 type Generator struct {
 	Base
-	Kafka     Kafka `envPrefix:"KAFKA_"`
-	RPS       int   `env:"GEN_RPS" envDefault:"1000"`
-	Campaigns int   `env:"GEN_CAMPAIGNS" envDefault:"1000"`
+	Kafka       Kafka   `envPrefix:"KAFKA_"`
+	RPS         int     `env:"GEN_RPS" envDefault:"1000"`
+	Campaigns   int     `env:"GEN_CAMPAIGNS" envDefault:"1000"`
+	Advertisers int     `env:"GEN_ADVERTISERS" envDefault:"100"`
+	ClickRate   float64 `env:"GEN_CLICK_RATE" envDefault:"0.02"`
 }
 
 type Ingester struct {
@@ -70,6 +72,12 @@ func (c Generator) Validate() error {
 	}
 	if c.Campaigns <= 0 {
 		errs = append(errs, errors.New("GEN_CAMPAIGNS must be > 0"))
+	}
+	if c.Advertisers <= 0 {
+		errs = append(errs, errors.New("GEN_ADVERTISERS must be > 0"))
+	}
+	if c.ClickRate > 1 || c.ClickRate < 0 {
+		errs = append(errs, errors.New("GEN_CLICK_RATE must be in [0, 1]"))
 	}
 	return errors.Join(errs...)
 }
