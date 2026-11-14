@@ -8,7 +8,7 @@ CREATE TABLE ad_events
     ad_id UInt64,
     cost_micros Int64,
     event_time DateTime64(3, 'UTC'),
-    inserted_at DateTime DEFAULT now(),
+    inserted_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(inserted_at)
 PARTITION BY toYYYYMMDD(event_time)
