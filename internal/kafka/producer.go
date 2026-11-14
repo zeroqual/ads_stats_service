@@ -26,11 +26,10 @@ func NewProducer(ctx context.Context, brokers []string, topic string) (*Producer
 		cl.Close()
 		return nil, fmt.Errorf("failed to ping kafka: %w", err)
 	}
-	p := &Producer{
-		client: cl,
-	}
 
-	return p, nil
+	return &Producer{
+		client: cl,
+	}, nil
 }
 
 func (p *Producer) Send(ctx context.Context, events []event.Event) error {
