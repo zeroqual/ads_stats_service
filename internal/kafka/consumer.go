@@ -51,7 +51,6 @@ func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
 		}
 
 		for _, fe := range fetches.Errors() {
-
 			if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
 				continue
 			}
