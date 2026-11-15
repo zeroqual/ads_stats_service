@@ -14,8 +14,9 @@ type Base struct {
 }
 
 type Kafka struct {
-	Brokers []string `env:"BROKERS" envDefault:"localhost:9092" envSeparator:","`
-	Topic   string   `env:"TOPIC" envDefault:"ad_events"`
+	Brokers  []string `env:"BROKERS" envDefault:"localhost:9092" envSeparator:","`
+	Topic    string   `env:"TOPIC" envDefault:"ad_events"`
+	TopicDLQ string   `env:"DLQ_TOPIC" envDefault:"ad_events_dlq"`
 }
 
 type ClickHouse struct {

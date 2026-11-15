@@ -68,6 +68,15 @@ func run() error {
 			log.Error("close consumer", slog.Any("err", err))
 		}
 	}()
+	producerDLQ, err := kafka.NewProducer(ctx, cfg.Kafka.Brokers, cfg.Kafka.TopicDLQ, "ads-ingester-dlq")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := producerDLQ.Close(); err != nil {
+			log.Error("close dlq producer", slog.Any("err", err))
+		}
+	}()
 
 	store, err := storage.NewCHConnector(ctx,
 		cfg.ClickHouse.Address, cfg.ClickHouse.DatabaseName,
@@ -92,7 +101,7 @@ func run() error {
 		}
 	}()
 
-	ing := ingester.New(consumer, store, deduper, ingester.Config{
+	ing := ingester.New(consumer, store, deduper, producerDLQ, ingester.Config{
 		BatchSize:       cfg.BatchSize,
 		FlushInterval:   cfg.FlushInterval,
 		OpTimeout:       opTimeout,

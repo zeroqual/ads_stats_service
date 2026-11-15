@@ -57,31 +57,45 @@ type fakeSource struct {
 	mu      sync.Mutex
 	batches [][]event.Event // что отдать из Consume, по одной пачке за вызов
 
+	// bad[k] — битые сообщения, которые отдаются вместе с batches[k].
+	// Можно не заполнять: тогда битых нет.
+	bad [][]event.BadEvent
+
 	// Если задан — вызывается сразу после того, как отдана последняя пачка.
 	// Так воспроизводится гонка «poll вернул данные, и тут же отменили ctx».
 	cancelAfterLast context.CancelFunc
 }
 
-func (s *fakeSource) Consume(ctx context.Context) ([]event.Event, error) {
+func (s *fakeSource) Consume(ctx context.Context) ([]event.Event, []event.BadEvent, error) {
 	s.mu.Lock()
 	if len(s.batches) > 0 {
 		batch := s.batches[0]
 		s.batches = s.batches[1:]
+
+		var bad []event.BadEvent
+		if len(s.bad) > 0 {
+			bad = s.bad[0]
+			s.bad = s.bad[1:]
+		}
+
 		last := len(s.batches) == 0
 		s.mu.Unlock()
 
 		s.j.add(fmt.Sprintf("consume:%d", len(batch)))
+		if len(bad) > 0 {
+			s.j.add(fmt.Sprintf("bad:%d", len(bad)))
+		}
 		if last && s.cancelAfterLast != nil {
 			s.cancelAfterLast()
 		}
-		return batch, nil
+		return batch, bad, nil
 	}
 	s.mu.Unlock()
 
 	// Данных больше нет — ведём себя как настоящий poll: ждём, пока
 	// не истечёт ctx (таймаут poll'а или остановка).
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return nil, nil, ctx.Err()
 }
 
 func (s *fakeSource) Commit(context.Context) error {
@@ -129,6 +143,38 @@ func (s *fakeSink) insertedEvents() []event.Event {
 }
 
 // ---------------------------------------------------------------------------
+// Фейк DLQ (вместо producer'а в ad_events_dlq)
+// ---------------------------------------------------------------------------
+
+type fakeDLQ struct {
+	j *journal
+
+	mu        sync.Mutex
+	failTimes int
+	sent      []event.BadEvent
+}
+
+func (d *fakeDLQ) SendDLQ(_ context.Context, bad []event.BadEvent) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.failTimes > 0 {
+		d.failTimes--
+		d.j.add("dlq_fail")
+		return errors.New("kafka is down")
+	}
+	d.sent = append(d.sent, bad...)
+	d.j.add(fmt.Sprintf("dlq:%d", len(bad)))
+	return nil
+}
+
+func (d *fakeDLQ) sentCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.sent)
+}
+
+// ---------------------------------------------------------------------------
 // Хелперы
 // ---------------------------------------------------------------------------
 
@@ -138,6 +184,14 @@ func newEvents(n int) []event.Event {
 		evs[k] = event.Event{EventID: uuid.New(), Type: event.Impression, CampaignID: 1}
 	}
 	return evs
+}
+
+func newBad(n int) []event.BadEvent {
+	bad := make([]event.BadEvent, n)
+	for k := range bad {
+		bad[k] = event.BadEvent{Value: []byte("{not json"), Offset: int64(k), Err: errors.New("bad json")}
+	}
+	return bad
 }
 
 func discardLogger() *slog.Logger {
@@ -201,7 +255,8 @@ func only(ops []string, prefixes ...string) []string {
 }
 
 // checkInvariants проверяет правила, которые должны выполняться всегда:
-//  1. commit не бывает, пока есть прочитанные, но не вставленные события;
+//  1. commit не бывает, пока есть прочитанные, но не обработанные сообщения
+//     (хорошие не вставлены в ClickHouse или битые не отправлены в DLQ);
 //  2. allow (разрешить ребалансировку) — тоже только когда всё вставлено.
 func checkInvariants(t *testing.T, ops []string) {
 	t.Helper()
@@ -214,6 +269,12 @@ func checkInvariants(t *testing.T, ops []string) {
 			pending += n
 		case strings.HasPrefix(op, "insert:"):
 			_, _ = fmt.Sscanf(op, "insert:%d", &n)
+			pending -= n
+		case strings.HasPrefix(op, "bad:"):
+			_, _ = fmt.Sscanf(op, "bad:%d", &n)
+			pending += n
+		case strings.HasPrefix(op, "dlq:"):
+			_, _ = fmt.Sscanf(op, "dlq:%d", &n)
 			pending -= n
 		case op == "commit" && pending != 0:
 			t.Errorf("op #%d: commit with %d events not inserted yet; ops=%v", idx, pending, ops)
@@ -233,7 +294,7 @@ func TestFlushBySize(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Интервал огромный — флаш может случиться только по размеру.
-	ing := New(src, sink, nil, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, nil, nil, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
 	start(t, context.Background(), ing)
 
 	waitFor(t, "commit after insert", func() bool { return j.has("commit") })
@@ -252,7 +313,7 @@ func TestFlushByTime(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Размер огромный — флаш может случиться только по времени.
-	ing := New(src, sink, nil, Config{BatchSize: 1000, FlushInterval: 20 * time.Millisecond}, discardLogger())
+	ing := New(src, sink, nil, nil, Config{BatchSize: 1000, FlushInterval: 20 * time.Millisecond}, discardLogger())
 	start(t, context.Background(), ing)
 
 	waitFor(t, "insert by timer", func() bool { return j.has("insert:1") })
@@ -264,7 +325,7 @@ func TestCommitOnlyAfterSuccessfulInsert(t *testing.T) {
 	src := &fakeSource{j: j, batches: [][]event.Event{newEvents(2)}}
 	sink := &fakeSink{j: j, failTimes: 2} // две вставки упадут, третья пройдёт
 
-	ing := New(src, sink, nil, Config{
+	ing := New(src, sink, nil, nil, Config{
 		BatchSize:     2,
 		FlushInterval: time.Hour,
 		BackoffBase:   time.Millisecond, // чтобы ретраи не тянулись секундами
@@ -287,7 +348,7 @@ func TestNoCommitIfInsertNeverSucceeds(t *testing.T) {
 	src := &fakeSource{j: j, batches: [][]event.Event{newEvents(1)}}
 	sink := &fakeSink{j: j, failTimes: 1 << 30} // ClickHouse лежит «навсегда»
 
-	ing := New(src, sink, nil, Config{
+	ing := New(src, sink, nil, nil, Config{
 		BatchSize:       1,
 		FlushInterval:   time.Hour,
 		BackoffBase:     time.Millisecond,
@@ -319,7 +380,7 @@ func TestEventsReturnedTogetherWithCancelAreNotLost(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Ни размер, ни таймер не сработают — спасти события может только shutdown.
-	ing := New(src, sink, nil, Config{BatchSize: 1000, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, nil, nil, Config{BatchSize: 1000, FlushInterval: time.Hour}, discardLogger())
 	done := start(t, ctx, ing)
 	waitDone(t, done)
 
@@ -348,7 +409,7 @@ func TestEveryEventInsertedExactlyOnce(t *testing.T) {
 	src := &fakeSource{j: j, batches: batches}
 	sink := &fakeSink{j: j}
 
-	ing := New(src, sink, nil, Config{BatchSize: 5, FlushInterval: 10 * time.Millisecond}, discardLogger())
+	ing := New(src, sink, nil, nil, Config{BatchSize: 5, FlushInterval: 10 * time.Millisecond}, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := start(t, ctx, ing)
 
@@ -429,7 +490,7 @@ func TestDuplicatesAreDropped(t *testing.T) {
 	sink := &fakeSink{j: j}
 	dd := newFakeDeduper(j)
 
-	ing := New(src, sink, dd, Config{BatchSize: 1, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, dd, nil, Config{BatchSize: 1, FlushInterval: time.Hour}, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := start(t, ctx, ing)
 
@@ -459,8 +520,110 @@ func TestDedupDownFailOpen(t *testing.T) {
 	dd := newFakeDeduper(j)
 	dd.down = true
 
-	ing := New(src, sink, dd, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, dd, nil, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
 	start(t, context.Background(), ing)
 
 	waitFor(t, "insert despite redis down", func() bool { return j.has("insert:3") })
+}
+
+// ---------------------------------------------------------------------------
+// DLQ
+// ---------------------------------------------------------------------------
+
+// Хорошие и битые в одной пачке: битые уходят в DLQ, хорошие — в ClickHouse,
+// и только после обоих — commit.
+func TestBadMessagesGoToDLQ(t *testing.T) {
+	j := &journal{}
+	src := &fakeSource{
+		j:       j,
+		batches: [][]event.Event{newEvents(2)},
+		bad:     [][]event.BadEvent{newBad(2)},
+	}
+	sink := &fakeSink{j: j}
+	dlq := &fakeDLQ{j: j}
+
+	ing := New(src, sink, nil, dlq, Config{BatchSize: 1, FlushInterval: time.Hour}, discardLogger())
+	start(t, context.Background(), ing)
+
+	waitFor(t, "commit", func() bool { return j.has("commit") })
+
+	got := only(j.snapshot(), "insert", "dlq", "commit")
+	want := []string{"dlq:2", "insert:2", "commit"}
+	if !slices.Equal(got[:len(want)], want) {
+		t.Fatalf("got %v, want prefix %v", got, want)
+	}
+	checkInvariants(t, j.snapshot())
+}
+
+// Пачка из одних битых: вставки нет, но DLQ и commit есть —
+// иначе эти offset'ы никогда не закоммитятся.
+func TestOnlyBadMessages(t *testing.T) {
+	j := &journal{}
+	src := &fakeSource{
+		j:       j,
+		batches: [][]event.Event{nil},
+		bad:     [][]event.BadEvent{newBad(3)},
+	}
+	sink := &fakeSink{j: j}
+	dlq := &fakeDLQ{j: j}
+
+	ing := New(src, sink, nil, dlq, Config{BatchSize: 1000, FlushInterval: 20 * time.Millisecond}, discardLogger())
+	start(t, context.Background(), ing)
+
+	waitFor(t, "commit", func() bool { return j.has("commit") })
+
+	got := only(j.snapshot(), "insert", "dlq", "commit")
+	if !slices.Equal(got[:2], []string{"dlq:3", "commit"}) {
+		t.Fatalf("got %v, want [dlq:3 commit ...]", got)
+	}
+	if slices.ContainsFunc(got, func(op string) bool { return strings.HasPrefix(op, "insert") }) {
+		t.Fatalf("no insert expected, got %v", got)
+	}
+	checkInvariants(t, j.snapshot())
+}
+
+// DLQ временно недоступен: ретраим, commit только после успешной отправки.
+func TestCommitOnlyAfterDLQSucceeds(t *testing.T) {
+	j := &journal{}
+	src := &fakeSource{
+		j:       j,
+		batches: [][]event.Event{nil},
+		bad:     [][]event.BadEvent{newBad(1)},
+	}
+	sink := &fakeSink{j: j}
+	dlq := &fakeDLQ{j: j, failTimes: 2}
+
+	ing := New(src, sink, nil, dlq, Config{
+		BatchSize:     1000,
+		FlushInterval: 10 * time.Millisecond,
+		BackoffBase:   time.Millisecond,
+		BackoffMax:    2 * time.Millisecond,
+	}, discardLogger())
+	start(t, context.Background(), ing)
+
+	waitFor(t, "commit", func() bool { return j.has("commit") })
+
+	got := only(j.snapshot(), "dlq", "commit")
+	want := []string{"dlq_fail", "dlq_fail", "dlq:1", "commit"}
+	if !slices.Equal(got[:len(want)], want) {
+		t.Fatalf("got %v, want prefix %v", got, want)
+	}
+	checkInvariants(t, j.snapshot())
+}
+
+// DLQ не передан (nil): битые сообщения отбрасываются с warn,
+// ingester не падает и продолжает работать.
+func TestNilDLQDoesNotPanic(t *testing.T) {
+	j := &journal{}
+	src := &fakeSource{
+		j:       j,
+		batches: [][]event.Event{newEvents(1)},
+		bad:     [][]event.BadEvent{newBad(1)},
+	}
+	sink := &fakeSink{j: j}
+
+	ing := New(src, sink, nil, nil, Config{BatchSize: 1, FlushInterval: time.Hour}, discardLogger())
+	start(t, context.Background(), ing)
+
+	waitFor(t, "insert and commit", func() bool { return j.has("insert:1") && j.has("commit") })
 }

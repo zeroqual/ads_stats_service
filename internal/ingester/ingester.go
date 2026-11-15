@@ -12,7 +12,7 @@ import (
 )
 
 type Source interface {
-	Consume(ctx context.Context) ([]event.Event, error)
+	Consume(ctx context.Context) ([]event.Event, []event.BadEvent, error)
 	Commit(ctx context.Context) error
 	AllowRebalance()
 }
@@ -66,22 +66,29 @@ type stats struct {
 	flushes      int
 	maxInsert    time.Duration
 	dedupDropped int
+	dlq          int
+}
+
+type DLQ interface {
+	SendDLQ(ctx context.Context, bad []event.BadEvent) error
 }
 
 type Ingester struct {
 	src   Source
 	sink  Sink
 	dedup Deduper
+	dlq   DLQ
 	log   *slog.Logger
 	cfg   Config
 
-	buffer  []event.Event
-	firstAt time.Time
+	buffer    []event.Event
+	badBuffer []event.BadEvent
+	firstAt   time.Time
 
 	stats stats
 }
 
-func New(src Source, sink Sink, dedup Deduper, cfg Config, log *slog.Logger) *Ingester {
+func New(src Source, sink Sink, dedup Deduper, dlq DLQ, cfg Config, log *slog.Logger) *Ingester {
 	if cfg.BatchSize <= 0 {
 		panic("BATCH_SIZE must be > 0")
 	}
@@ -93,6 +100,7 @@ func New(src Source, sink Sink, dedup Deduper, cfg Config, log *slog.Logger) *In
 		src:    src,
 		sink:   sink,
 		dedup:  dedup,
+		dlq:    dlq,
 		log:    log,
 		cfg:    cfg,
 		buffer: make([]event.Event, 0, cfg.BatchSize),
@@ -103,7 +111,7 @@ func New(src Source, sink Sink, dedup Deduper, cfg Config, log *slog.Logger) *In
 func (i *Ingester) Run(ctx context.Context) {
 	defer i.shutdown()
 	for {
-		events, err := i.poll(ctx)
+		events, bad, err := i.poll(ctx)
 		if err != nil {
 			if ctx.Err() == nil {
 				i.log.Error("source stopped", slog.Any("err", err))
@@ -111,7 +119,7 @@ func (i *Ingester) Run(ctx context.Context) {
 			return
 		}
 
-		i.add(events)
+		i.add(events, bad)
 
 		if i.shouldFlush() {
 			if err := i.flush(ctx); err != nil {
@@ -119,7 +127,7 @@ func (i *Ingester) Run(ctx context.Context) {
 			}
 		}
 
-		if len(i.buffer) == 0 {
+		if i.pending() == 0 {
 			i.src.AllowRebalance()
 		}
 
@@ -127,53 +135,66 @@ func (i *Ingester) Run(ctx context.Context) {
 	}
 }
 
-func (i *Ingester) poll(ctx context.Context) ([]event.Event, error) {
+func (i *Ingester) poll(ctx context.Context) ([]event.Event, []event.BadEvent, error) {
 	wait := i.cfg.FlushInterval
-	if len(i.buffer) > 0 {
+	if i.pending() > 0 {
 		wait = max(i.cfg.FlushInterval-time.Since(i.firstAt), i.cfg.MinPollWait)
 	}
 
 	pollCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
-	events, err := i.src.Consume(pollCtx)
+	events, badEvents, err := i.src.Consume(pollCtx)
 
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return events, err
+	return events, badEvents, err
 }
 
-func (i *Ingester) add(events []event.Event) {
-	if len(events) == 0 {
+func (i *Ingester) add(events []event.Event, badEvent []event.BadEvent) {
+	if len(events) == 0 && len(badEvent) == 0 {
 		return
 	}
-	if len(i.buffer) == 0 {
+	if i.pending() == 0 {
 		i.firstAt = time.Now()
 	}
 	i.buffer = append(i.buffer, events...)
+	i.badBuffer = append(i.badBuffer, badEvent...)
 	i.stats.consumed += len(events)
 }
 
 func (i *Ingester) shouldFlush() bool {
-	if len(i.buffer) == 0 {
+	if i.pending() == 0 {
 		return false
 	}
 	return len(i.buffer) >= i.cfg.BatchSize || time.Since(i.firstAt) >= i.cfg.FlushInterval
 }
 
 func (i *Ingester) flush(ctx context.Context) error {
-	if len(i.buffer) == 0 {
+	if i.pending() == 0 {
 		return nil
+	}
+
+	n := len(i.badBuffer)
+	if n > 0 && i.dlq == nil {
+		i.log.Warn("no DLQ configured, dropping bad messages", slog.Int("count", n))
+		i.badBuffer = i.badBuffer[:0]
+	} else if n > 0 {
+		_, err := i.insertWithRetryDLQ(ctx)
+		if err != nil {
+			return err
+		}
+		i.badBuffer = i.badBuffer[:0]
+		i.stats.dlq += n
 	}
 
 	i.dropDuplicates(ctx)
 
-	if len(i.buffer) == 0 {
+	if i.pending() == 0 {
 		i.commit(ctx)
 		return nil
 	}
-
 	took, err := i.insertWithRetry(ctx)
 	if err != nil {
 		return err
@@ -263,6 +284,7 @@ func (i *Ingester) maybeLogStats() {
 		slog.Int("buffered", len(i.buffer)),
 		slog.Float64("rps", float64(i.stats.inserted)/elapsed.Seconds()),
 		slog.Int("dedup", i.stats.dedupDropped),
+		slog.Int("dlq", i.stats.dlq),
 	)
 	i.stats = stats{since: time.Now()}
 }
@@ -331,4 +353,36 @@ func eventIDs(events []event.Event) []uuid.UUID {
 		ids[k] = ev.EventID
 	}
 	return ids
+}
+
+func (i *Ingester) pending() int {
+	return len(i.buffer) + len(i.badBuffer)
+}
+
+func (i *Ingester) insertWithRetryDLQ(ctx context.Context) (time.Duration, error) {
+	for attempt := 0; ; attempt++ {
+		start := time.Now()
+
+		insertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.cfg.OpTimeout)
+		err := i.dlq.SendDLQ(insertCtx, i.badBuffer)
+		cancel()
+
+		if err == nil {
+			return time.Since(start), nil
+		}
+
+		delay := i.backoff(attempt)
+		i.log.Warn("insert failed, retrying",
+			slog.Int("attempt", attempt+1),
+			slog.Int("batch_size", len(i.badBuffer)),
+			slog.Duration("retry_in", delay),
+			slog.Any("err", err),
+		)
+
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
 }

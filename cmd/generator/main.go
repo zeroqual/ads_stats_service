@@ -52,7 +52,7 @@ func run() error {
 	slog.Info("started", slog.Any("config", cfg))
 
 	gen := generator.New(cfg, nil)
-	producer, err := kafka.NewProducer(ctx, cfg.Kafka.Brokers, cfg.Kafka.Topic)
+	producer, err := kafka.NewProducer(ctx, cfg.Kafka.Brokers, cfg.Kafka.Topic, "ads-generator")
 	if err != nil {
 		return err
 	}

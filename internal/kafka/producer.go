@@ -15,8 +15,8 @@ type Producer struct {
 	client *kgo.Client
 }
 
-func NewProducer(ctx context.Context, brokers []string, topic string) (*Producer, error) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.DefaultProduceTopic(topic), kgo.ClientID("ads-generator"))
+func NewProducer(ctx context.Context, brokers []string, topic string, clientID string) (*Producer, error) {
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.DefaultProduceTopic(topic), kgo.ClientID(clientID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client for producer: %w", err)
 	}
@@ -48,6 +48,42 @@ func (p *Producer) Send(ctx context.Context, events []event.Event) error {
 		records = append(records, &kgo.Record{
 			Key:   strconv.AppendUint(nil, ev.CampaignID, 10),
 			Value: payload,
+		})
+	}
+
+	results := p.client.ProduceSync(ctx, records...)
+	err := results.FirstErr()
+	if err != nil {
+		return fmt.Errorf("failed to produce: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Producer) SendDLQ(ctx context.Context, badEvents []event.BadEvent) error {
+	if len(badEvents) == 0 {
+		return nil
+	}
+
+	records := make([]*kgo.Record, 0, len(badEvents))
+
+	for _, ev := range badEvents {
+		records = append(records, &kgo.Record{
+			Value: ev.Value,
+			Headers: []kgo.RecordHeader{
+				{
+					Key:   "errors",
+					Value: []byte(ev.Err.Error()),
+				},
+				{
+					Key:   "source_partition",
+					Value: strconv.AppendInt(nil, int64(ev.Partition), 10),
+				},
+				{
+					Key:   "source_offset",
+					Value: strconv.AppendInt(nil, ev.Offset, 10),
+				},
+			},
 		})
 	}
 

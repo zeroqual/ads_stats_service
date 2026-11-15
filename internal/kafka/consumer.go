@@ -43,11 +43,11 @@ func NewConsumer(ctx context.Context, brokers []string, topic string, groupID st
 	}, nil
 }
 
-func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
+func (c *Consumer) Consume(ctx context.Context) ([]event.Event, []event.BadEvent, error) {
 	for {
 		fetches := c.client.PollFetches(ctx)
 		if fetches.IsClientClosed() {
-			return nil, ErrClosed
+			return nil, nil, ErrClosed
 		}
 
 		for _, fe := range fetches.Errors() {
@@ -59,6 +59,7 @@ func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
 		}
 
 		events := make([]event.Event, 0, len(fetches.Records()))
+		badEvents := make([]event.BadEvent, 0, len(fetches.Records()))
 		fetches.EachRecord(func(r *kgo.Record) {
 			var evt event.Event
 			if err := json.Unmarshal(r.Value, &evt); err != nil {
@@ -68,20 +69,35 @@ func (c *Consumer) Consume(ctx context.Context) ([]event.Event, error) {
 					slog.Any("error", err),
 					slog.Int64("offset", r.Offset),
 				)
+				badEvents = append(badEvents, event.BadEvent{
+					Value:     r.Value,
+					Partition: r.Partition,
+					Offset:    r.Offset,
+					Err:       err,
+				})
 				return
 			}
-
+			err := evt.Validate()
+			if err != nil {
+				badEvents = append(badEvents, event.BadEvent{
+					Value:     r.Value,
+					Partition: r.Partition,
+					Offset:    r.Offset,
+					Err:       err,
+				})
+			} else {
+				events = append(events, evt)
+			}
 			// slog.Debug("new event",
 			// 	slog.Any("event", evt),
 			// )
-			events = append(events, evt)
 		})
 
-		if len(events) > 0 {
-			return events, nil
+		if len(events) > 0 || len(badEvents) > 0 {
+			return events, badEvents, nil
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 }
