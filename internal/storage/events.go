@@ -50,7 +50,9 @@ func (c *CHConnector) Insert(ctx context.Context, events []event.Event) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
-	defer func() { _ = batch.Abort() }()
+	defer func() {
+		_ = batch.Abort()
+	}()
 	for _, ev := range events {
 		err := batch.Append(ev.EventID, string(ev.Type), ev.AdvertiserID, ev.CampaignID, ev.AdID, ev.CostMicros, ev.EventTime)
 		if err != nil {
