@@ -25,13 +25,19 @@ type ClickHouse struct {
 	Password     string `env:"PASSWORD,required" json:"-"`
 }
 
+type Redis struct {
+	Address  string `env:"ADDR" envDefault:"localhost:6379"`
+	Password string `env:"PASSWORD,required" json:"-"`
+}
+
 type Generator struct {
 	Base
-	Kafka       Kafka   `envPrefix:"KAFKA_"`
-	RPS         int     `env:"GEN_RPS" envDefault:"1000"`
-	Campaigns   int     `env:"GEN_CAMPAIGNS" envDefault:"1000"`
-	Advertisers int     `env:"GEN_ADVERTISERS" envDefault:"100"`
-	ClickRate   float64 `env:"GEN_CLICK_RATE" envDefault:"0.02"`
+	Kafka         Kafka   `envPrefix:"KAFKA_"`
+	RPS           int     `env:"GEN_RPS" envDefault:"1000"`
+	Campaigns     int     `env:"GEN_CAMPAIGNS" envDefault:"1000"`
+	Advertisers   int     `env:"GEN_ADVERTISERS" envDefault:"100"`
+	ClickRate     float64 `env:"GEN_CLICK_RATE" envDefault:"0.02"`
+	DuplicateRate float64 `env:"GEN_DUPLICATE_RATE" envDefault:"0"`
 }
 
 type Ingester struct {
@@ -41,6 +47,8 @@ type Ingester struct {
 	BatchSize     int           `env:"BATCH_SIZE" envDefault:"5000"`
 	FlushInterval time.Duration `env:"BATCH_FLUSH_INTERVAL" envDefault:"1s"`
 	GroupID       string        `env:"KAFKA_GROUP_ID" envDefault:"ads-ingester"`
+	Redis         Redis         `envPrefix:"REDIS_"`
+	DedupTTL      time.Duration `env:"DEDUP_TTL" envDefault:"1h"`
 }
 
 type ReportAPI struct {
@@ -79,6 +87,9 @@ func (c Generator) Validate() error {
 	if c.ClickRate > 1 || c.ClickRate < 0 {
 		errs = append(errs, errors.New("GEN_CLICK_RATE must be in [0, 1]"))
 	}
+	if c.DuplicateRate < 0 || c.DuplicateRate > 1 {
+		errs = append(errs, errors.New("GEN_DUPLICATE_RATE must be in [0, 1]"))
+	}
 	return errors.Join(errs...)
 }
 
@@ -92,6 +103,12 @@ func (c Ingester) Validate() error {
 	}
 	if c.ClickHouse.Address == "" {
 		errs = append(errs, errors.New("CLICKHOUSE_ADDR is empty"))
+	}
+	if c.Redis.Address == "" {
+		errs = append(errs, errors.New("REDIS_ADDR is empty"))
+	}
+	if c.DedupTTL <= 0 {
+		errs = append(errs, errors.New("DEDUP_TTL must be > 0"))
 	}
 	return errors.Join(errs...)
 }

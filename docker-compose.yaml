@@ -37,7 +37,16 @@ services:
       nofile:
         soft: 262144
         hard: 262144
-
+  redis:
+    image: redis:8-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: 
+      ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-ttl"]
+    volumes:
+      - redis-data:/data
 volumes:
   kafka-data:
   clickhouse-data:
+  redis-data:

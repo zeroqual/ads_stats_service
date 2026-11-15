@@ -24,10 +24,14 @@ type Generator struct {
 	clickRate   float64
 	campaigns   int
 	advertisers int
-
-	rnd *rand.Rand
-	now func() time.Time
+	dupRate     float64
+	recent      []event.Event
+	recentPos   int
+	rnd         *rand.Rand
+	now         func() time.Time
 }
+
+const recentSize = 1000
 
 func New(cfg config.Generator, rnd *rand.Rand) *Generator {
 	if rnd == nil {
@@ -37,22 +41,24 @@ func New(cfg config.Generator, rnd *rand.Rand) *Generator {
 		clickRate:   cfg.ClickRate,
 		campaigns:   cfg.Campaigns,
 		advertisers: cfg.Advertisers,
+		dupRate:     cfg.DuplicateRate,
 		rnd:         rnd,
 		now:         time.Now,
 	}
 }
 
 func (g *Generator) Next() event.Event {
+	if len(g.recent) > 0 && g.rnd.Float64() < g.dupRate {
+		return g.recent[g.rnd.IntN(len(g.recent))]
+	}
 	campaignID := g.pickCampaign()
-
 	eventType := event.Impression
 	cost := g.jitter(avgImpressionCostMicros)
 	if g.rnd.Float64() < g.clickRate {
 		eventType = event.Click
 		cost = g.jitter(avgClickCostMicros)
 	}
-
-	return event.Event{
+	ev := event.Event{
 		EventID:      uuid.New(),
 		Type:         eventType,
 		AdvertiserID: g.advertiserOf(campaignID),
@@ -61,6 +67,8 @@ func (g *Generator) Next() event.Event {
 		CostMicros:   cost,
 		EventTime:    g.now().UTC(),
 	}
+	g.remember(ev)
+	return ev
 }
 
 func (g *Generator) pickCampaign() uint64 {
@@ -78,4 +86,13 @@ func (g *Generator) pickAd(campaignID uint64) uint64 {
 func (g *Generator) jitter(avg int64) int64 {
 	k := 1 + costJitter*(2*g.rnd.Float64()-1)
 	return int64(float64(avg) * k)
+}
+
+func (g *Generator) remember(ev event.Event) {
+	if len(g.recent) < recentSize {
+		g.recent = append(g.recent, ev)
+		return
+	}
+	g.recent[g.recentPos] = ev // перезаписываем самое старое
+	g.recentPos = (g.recentPos + 1) % recentSize
 }
