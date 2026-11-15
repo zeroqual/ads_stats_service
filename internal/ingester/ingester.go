@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/zeroqual/ads_stats_service/internal/event"
 )
 
@@ -53,19 +54,26 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+type Deduper interface {
+	Seen(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error)
+	Mark(ctx context.Context, ids []uuid.UUID) error
+}
+
 type stats struct {
-	since     time.Time
-	consumed  int
-	inserted  int
-	flushes   int
-	maxInsert time.Duration
+	since        time.Time
+	consumed     int
+	inserted     int
+	flushes      int
+	maxInsert    time.Duration
+	dedupDropped int
 }
 
 type Ingester struct {
-	src  Source
-	sink Sink
-	log  *slog.Logger
-	cfg  Config
+	src   Source
+	sink  Sink
+	dedup Deduper
+	log   *slog.Logger
+	cfg   Config
 
 	buffer  []event.Event
 	firstAt time.Time
@@ -73,7 +81,7 @@ type Ingester struct {
 	stats stats
 }
 
-func New(src Source, sink Sink, cfg Config, log *slog.Logger) *Ingester {
+func New(src Source, sink Sink, dedup Deduper, cfg Config, log *slog.Logger) *Ingester {
 	if cfg.BatchSize <= 0 {
 		panic("BATCH_SIZE must be > 0")
 	}
@@ -84,6 +92,7 @@ func New(src Source, sink Sink, cfg Config, log *slog.Logger) *Ingester {
 	return &Ingester{
 		src:    src,
 		sink:   sink,
+		dedup:  dedup,
 		log:    log,
 		cfg:    cfg,
 		buffer: make([]event.Event, 0, cfg.BatchSize),
@@ -158,6 +167,13 @@ func (i *Ingester) flush(ctx context.Context) error {
 		return nil
 	}
 
+	i.dropDuplicates(ctx)
+
+	if len(i.buffer) == 0 {
+		i.commit(ctx)
+		return nil
+	}
+
 	took, err := i.insertWithRetry(ctx)
 	if err != nil {
 		return err
@@ -166,6 +182,8 @@ func (i *Ingester) flush(ctx context.Context) error {
 	i.stats.inserted += len(i.buffer)
 	i.stats.flushes++
 	i.stats.maxInsert = max(i.stats.maxInsert, took)
+
+	i.markInserted(ctx)
 
 	i.buffer = i.buffer[:0]
 	i.commit(ctx)
@@ -244,6 +262,7 @@ func (i *Ingester) maybeLogStats() {
 		slog.Duration("max_insert", i.stats.maxInsert),
 		slog.Int("buffered", len(i.buffer)),
 		slog.Float64("rps", float64(i.stats.inserted)/elapsed.Seconds()),
+		slog.Int("dedup", i.stats.dedupDropped),
 	)
 	i.stats = stats{since: time.Now()}
 }
@@ -254,4 +273,62 @@ func (i *Ingester) backoff(attempt int) time.Duration {
 		d = min(i.cfg.BackoffBase<<attempt, i.cfg.BackoffMax)
 	}
 	return d/2 + rand.N(d/2+1)
+}
+
+func (i *Ingester) dropDuplicates(ctx context.Context) {
+	before := len(i.buffer)
+
+	inBuffer := make(map[uuid.UUID]struct{}, len(i.buffer))
+
+	out := i.buffer[:0]
+
+	for _, ev := range i.buffer {
+		if _, dup := inBuffer[ev.EventID]; dup {
+			continue
+		}
+		inBuffer[ev.EventID] = struct{}{}
+		out = append(out, ev)
+	}
+
+	i.buffer = out
+
+	if i.dedup != nil && len(i.buffer) > 0 {
+		opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.cfg.OpTimeout)
+		seen, err := i.dedup.Seen(opCtx, eventIDs(i.buffer))
+		cancel()
+
+		if err != nil {
+			i.log.Warn("dedup unavailable, skipping", slog.Any("err", err))
+		} else {
+			out := i.buffer[:0]
+			for _, ev := range i.buffer {
+				if !seen[ev.EventID] {
+					out = append(out, ev)
+				}
+			}
+			i.buffer = out
+		}
+	}
+
+	i.stats.dedupDropped += before - len(i.buffer)
+}
+
+func (i *Ingester) markInserted(ctx context.Context) {
+	if i.dedup == nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.cfg.OpTimeout)
+	defer cancel()
+
+	if err := i.dedup.Mark(opCtx, eventIDs(i.buffer)); err != nil {
+		i.log.Warn("dedup mark failed", slog.Any("err", err))
+	}
+}
+
+func eventIDs(events []event.Event) []uuid.UUID {
+	ids := make([]uuid.UUID, len(events))
+	for k, ev := range events {
+		ids[k] = ev.EventID
+	}
+	return ids
 }

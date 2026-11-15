@@ -233,7 +233,7 @@ func TestFlushBySize(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Интервал огромный — флаш может случиться только по размеру.
-	ing := New(src, sink, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, nil, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
 	start(t, context.Background(), ing)
 
 	waitFor(t, "commit after insert", func() bool { return j.has("commit") })
@@ -252,7 +252,7 @@ func TestFlushByTime(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Размер огромный — флаш может случиться только по времени.
-	ing := New(src, sink, Config{BatchSize: 1000, FlushInterval: 20 * time.Millisecond}, discardLogger())
+	ing := New(src, sink, nil, Config{BatchSize: 1000, FlushInterval: 20 * time.Millisecond}, discardLogger())
 	start(t, context.Background(), ing)
 
 	waitFor(t, "insert by timer", func() bool { return j.has("insert:1") })
@@ -264,7 +264,7 @@ func TestCommitOnlyAfterSuccessfulInsert(t *testing.T) {
 	src := &fakeSource{j: j, batches: [][]event.Event{newEvents(2)}}
 	sink := &fakeSink{j: j, failTimes: 2} // две вставки упадут, третья пройдёт
 
-	ing := New(src, sink, Config{
+	ing := New(src, sink, nil, Config{
 		BatchSize:     2,
 		FlushInterval: time.Hour,
 		BackoffBase:   time.Millisecond, // чтобы ретраи не тянулись секундами
@@ -287,7 +287,7 @@ func TestNoCommitIfInsertNeverSucceeds(t *testing.T) {
 	src := &fakeSource{j: j, batches: [][]event.Event{newEvents(1)}}
 	sink := &fakeSink{j: j, failTimes: 1 << 30} // ClickHouse лежит «навсегда»
 
-	ing := New(src, sink, Config{
+	ing := New(src, sink, nil, Config{
 		BatchSize:       1,
 		FlushInterval:   time.Hour,
 		BackoffBase:     time.Millisecond,
@@ -319,7 +319,7 @@ func TestEventsReturnedTogetherWithCancelAreNotLost(t *testing.T) {
 	sink := &fakeSink{j: j}
 
 	// Ни размер, ни таймер не сработают — спасти события может только shutdown.
-	ing := New(src, sink, Config{BatchSize: 1000, FlushInterval: time.Hour}, discardLogger())
+	ing := New(src, sink, nil, Config{BatchSize: 1000, FlushInterval: time.Hour}, discardLogger())
 	done := start(t, ctx, ing)
 	waitDone(t, done)
 
@@ -348,7 +348,7 @@ func TestEveryEventInsertedExactlyOnce(t *testing.T) {
 	src := &fakeSource{j: j, batches: batches}
 	sink := &fakeSink{j: j}
 
-	ing := New(src, sink, Config{BatchSize: 5, FlushInterval: 10 * time.Millisecond}, discardLogger())
+	ing := New(src, sink, nil, Config{BatchSize: 5, FlushInterval: 10 * time.Millisecond}, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := start(t, ctx, ing)
 
@@ -376,4 +376,91 @@ func TestEveryEventInsertedExactlyOnce(t *testing.T) {
 		t.Errorf("inserted %d unique events, want %d", len(seen), len(all))
 	}
 	checkInvariants(t, j.snapshot())
+}
+
+// ---------------------------------------------------------------------------
+// Дедупликация
+// ---------------------------------------------------------------------------
+
+type fakeDeduper struct {
+	j *journal
+
+	mu    sync.Mutex
+	marks map[uuid.UUID]bool
+	down  bool // имитация недоступного Redis
+}
+
+func newFakeDeduper(j *journal) *fakeDeduper {
+	return &fakeDeduper{j: j, marks: make(map[uuid.UUID]bool)}
+}
+
+func (d *fakeDeduper) Seen(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.down {
+		return nil, errors.New("redis is down")
+	}
+	res := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		res[id] = d.marks[id]
+	}
+	return res, nil
+}
+
+func (d *fakeDeduper) Mark(_ context.Context, ids []uuid.UUID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, id := range ids {
+		d.marks[id] = true
+	}
+	d.j.add(fmt.Sprintf("mark:%d", len(ids)))
+	return nil
+}
+
+func TestDuplicatesAreDropped(t *testing.T) {
+	a, b, c := newEvents(1)[0], newEvents(1)[0], newEvents(1)[0]
+
+	j := &journal{}
+	src := &fakeSource{j: j, batches: [][]event.Event{
+		{a, b, a},    // дубль внутри одного буфера
+		{c, b},       // b уже вставлен в прошлом flush
+		{a, b, c, c}, // всё — дубли
+	}}
+	sink := &fakeSink{j: j}
+	dd := newFakeDeduper(j)
+
+	ing := New(src, sink, dd, Config{BatchSize: 1, FlushInterval: time.Hour}, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := start(t, ctx, ing)
+
+	waitFor(t, "all consumed", func() bool { return len(only(j.snapshot(), "consume")) == 3 })
+	waitFor(t, "last commit", func() bool { return len(only(j.snapshot(), "commit")) >= 3 })
+	cancel()
+	waitDone(t, done)
+
+	got := only(j.snapshot(), "insert", "mark", "commit")
+	want := []string{
+		"insert:2", "mark:2", "commit", // a, b
+		"insert:1", "mark:1", "commit", // c
+		"commit", // всё дубли: вставки нет, но коммит есть
+	}
+	if !slices.Equal(got[:len(want)], want) {
+		t.Fatalf("got %v, want prefix %v", got, want)
+	}
+	if n := len(sink.insertedEvents()); n != 3 {
+		t.Fatalf("inserted %d events, want 3", n)
+	}
+}
+
+func TestDedupDownFailOpen(t *testing.T) {
+	j := &journal{}
+	src := &fakeSource{j: j, batches: [][]event.Event{newEvents(3)}}
+	sink := &fakeSink{j: j}
+	dd := newFakeDeduper(j)
+	dd.down = true
+
+	ing := New(src, sink, dd, Config{BatchSize: 3, FlushInterval: time.Hour}, discardLogger())
+	start(t, context.Background(), ing)
+
+	waitFor(t, "insert despite redis down", func() bool { return j.has("insert:3") })
 }

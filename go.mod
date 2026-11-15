@@ -7,6 +7,7 @@ require (
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
+	github.com/redis/go-redis/v9 v9.23.0
 	github.com/twmb/franz-go v1.22.3
 )
 
@@ -24,5 +25,6 @@ require (
 	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )

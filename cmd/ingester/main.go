@@ -14,6 +14,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/zeroqual/ads_stats_service/internal/config"
+	"github.com/zeroqual/ads_stats_service/internal/dedup"
 	"github.com/zeroqual/ads_stats_service/internal/ingester"
 	"github.com/zeroqual/ads_stats_service/internal/kafka"
 	"github.com/zeroqual/ads_stats_service/internal/logger"
@@ -81,7 +82,17 @@ func run() error {
 		}
 	}()
 
-	ing := ingester.New(consumer, store, ingester.Config{
+	deduper, err := dedup.New(ctx, cfg.Redis.Address, cfg.Redis.Password, cfg.DedupTTL)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := deduper.Close(); err != nil {
+			log.Error("close redis", slog.Any("err", err))
+		}
+	}()
+
+	ing := ingester.New(consumer, store, deduper, ingester.Config{
 		BatchSize:       cfg.BatchSize,
 		FlushInterval:   cfg.FlushInterval,
 		OpTimeout:       opTimeout,
