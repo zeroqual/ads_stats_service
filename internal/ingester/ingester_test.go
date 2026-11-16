@@ -552,6 +552,12 @@ func TestBadMessagesGoToDLQ(t *testing.T) {
 	if !slices.Equal(got[:len(want)], want) {
 		t.Fatalf("got %v, want prefix %v", got, want)
 	}
+	if n := dlq.sentCount(); n != 2 {
+		t.Fatalf("sent to DLQ %d messages, want 2", n)
+	}
+	if n := len(sink.insertedEvents()); n != 2 {
+		t.Fatalf("inserted %d events, want 2", n)
+	}
 	checkInvariants(t, j.snapshot())
 }
 
@@ -578,6 +584,9 @@ func TestOnlyBadMessages(t *testing.T) {
 	}
 	if slices.ContainsFunc(got, func(op string) bool { return strings.HasPrefix(op, "insert") }) {
 		t.Fatalf("no insert expected, got %v", got)
+	}
+	if n := dlq.sentCount(); n != 3 {
+		t.Fatalf("sent to DLQ %d messages, want 3", n)
 	}
 	checkInvariants(t, j.snapshot())
 }
@@ -607,6 +616,10 @@ func TestCommitOnlyAfterDLQSucceeds(t *testing.T) {
 	want := []string{"dlq_fail", "dlq_fail", "dlq:1", "commit"}
 	if !slices.Equal(got[:len(want)], want) {
 		t.Fatalf("got %v, want prefix %v", got, want)
+	}
+	// Неудачные попытки ничего не отправили — в DLQ ровно одно сообщение, без повторов.
+	if n := dlq.sentCount(); n != 1 {
+		t.Fatalf("sent to DLQ %d messages, want 1", n)
 	}
 	checkInvariants(t, j.snapshot())
 }

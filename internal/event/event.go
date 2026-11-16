@@ -37,7 +37,7 @@ func (e Event) Validate() error {
 		errs = append(errs, errors.New("AdvertiserID is empty"))
 	}
 	if e.Type != Impression && e.Type != Click {
-		errs = append(errs, errors.New("Bad Type"))
+		errs = append(errs, errors.New("bad type"))
 	}
 	if e.CostMicros < 0 {
 		errs = append(errs, errors.New("CostMicros must be >=0"))

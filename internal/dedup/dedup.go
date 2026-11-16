@@ -25,7 +25,10 @@ func New(ctx context.Context, addr, password string, ttl time.Duration) (*RedisD
 	defer cancel()
 
 	if err := cl.Ping(ctxTimeout).Err(); err != nil {
-		cl.Close()
+		err = cl.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to close redis and ping down: %w", err)
+		}
 		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
 
