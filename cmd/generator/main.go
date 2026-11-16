@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zeroqual/ads_stats_service/internal/config"
 	"github.com/zeroqual/ads_stats_service/internal/event"
 	"github.com/zeroqual/ads_stats_service/internal/generator"
 	"github.com/zeroqual/ads_stats_service/internal/kafka"
 	"github.com/zeroqual/ads_stats_service/internal/logger"
+	"github.com/zeroqual/ads_stats_service/internal/metrics"
 )
 
 const (
@@ -61,10 +64,28 @@ func run() error {
 			log.Error("close producer", slog.Any("err", err))
 		}
 	}()
-
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	serv := http.Server{
+		Addr:              cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		slog.Info("starting server", slog.String("PORT", serv.Addr))
+		if err := serv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("failed to start server", slog.Any("err", err))
+			return
+		}
+	}()
 	produceLoop(ctx, log, gen, producer, cfg.RPS)
 
-	slog.Info("shutdown")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := serv.Shutdown(shutdownCtx); err != nil {
+		log.Error("metrics server shutdown", slog.Any("err", err))
+	}
+	slog.Info("Server exited gracefully")
 
 	return nil
 }
@@ -117,10 +138,12 @@ func produceLoop(ctx context.Context, log *slog.Logger, gen *generator.Generator
 				}
 
 				failed += len(batch)
+				metrics.GeneratorEventCountErr.Add(float64(len(batch)))
 				log.Error("send batch", slog.Any("err", err), slog.Int("size", len(batch)))
 				continue
 			}
 			sent += len(batch)
+			metrics.GeneratorEventCount.Add(float64(len(batch)))
 		}
 	}
 }

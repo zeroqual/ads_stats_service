@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zeroqual/ads_stats_service/internal/event"
+	"github.com/zeroqual/ads_stats_service/internal/metrics"
 )
 
 type Source interface {
@@ -145,7 +146,7 @@ func (i *Ingester) poll(ctx context.Context) ([]event.Event, []event.BadEvent, e
 	defer cancel()
 
 	events, badEvents, err := i.src.Consume(pollCtx)
-
+	metrics.Consumed.Add(float64(len(events)))
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return nil, nil, nil
 	}
@@ -175,7 +176,6 @@ func (i *Ingester) flush(ctx context.Context) error {
 	if i.pending() == 0 {
 		return nil
 	}
-
 	n := len(i.badBuffer)
 	if n > 0 && i.dlq == nil {
 		i.log.Warn("no DLQ configured, dropping bad messages", slog.Int("count", n))
@@ -186,6 +186,7 @@ func (i *Ingester) flush(ctx context.Context) error {
 			return err
 		}
 		i.badBuffer = i.badBuffer[:0]
+		metrics.DLQTotal.Add(float64(n))
 		i.stats.dlq += n
 	}
 
@@ -201,6 +202,9 @@ func (i *Ingester) flush(ctx context.Context) error {
 	}
 
 	i.stats.inserted += len(i.buffer)
+	metrics.Inserted.Add(float64(len(i.buffer)))
+	metrics.BatchSize.Observe(float64(len(i.buffer)))
+	metrics.InsertDuration.Observe(took.Seconds())
 	i.stats.flushes++
 	i.stats.maxInsert = max(i.stats.maxInsert, took)
 
@@ -222,7 +226,7 @@ func (i *Ingester) insertWithRetry(ctx context.Context) (time.Duration, error) {
 		if err == nil {
 			return time.Since(start), nil
 		}
-
+		metrics.InsertedErr.Inc()
 		delay := i.backoff(attempt)
 		i.log.Warn("insert failed, retrying",
 			slog.Int("attempt", attempt+1),
@@ -274,7 +278,7 @@ func (i *Ingester) maybeLogStats() {
 	if i.stats.flushes > 0 {
 		avgBatch = i.stats.inserted / i.stats.flushes
 	}
-
+	metrics.BufferSize.Set(float64(len(i.buffer)))
 	i.log.Info("stats",
 		slog.Int("consumed", i.stats.consumed),
 		slog.Int("inserted", i.stats.inserted),
@@ -331,7 +335,7 @@ func (i *Ingester) dropDuplicates(ctx context.Context) {
 			i.buffer = out
 		}
 	}
-
+	metrics.DedupDropped.Add(float64(before - len(i.buffer)))
 	i.stats.dedupDropped += before - len(i.buffer)
 }
 

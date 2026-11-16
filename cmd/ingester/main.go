@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/zeroqual/ads_stats_service/internal/config"
 	"github.com/zeroqual/ads_stats_service/internal/dedup"
@@ -101,6 +103,21 @@ func run() error {
 		}
 	}()
 
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	serv := http.Server{
+		Addr:              cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		slog.Info("starting server", slog.String("PORT", serv.Addr))
+		if err := serv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("failed to start server", slog.Any("err", err))
+			return
+		}
+	}()
+
 	ing := ingester.New(consumer, store, deduper, producerDLQ, ingester.Config{
 		BatchSize:       cfg.BatchSize,
 		FlushInterval:   cfg.FlushInterval,
@@ -115,6 +132,11 @@ func run() error {
 	log.Info("started", slog.Any("config", cfg))
 	ing.Run(ctx)
 	log.Info("stopped")
-
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := serv.Shutdown(shutdownCtx); err != nil {
+		log.Error("metrics server shutdown", slog.Any("err", err))
+	}
+	slog.Info("Server exited gracefully")
 	return nil
 }

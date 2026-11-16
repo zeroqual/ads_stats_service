@@ -39,6 +39,7 @@ type Generator struct {
 	Advertisers   int     `env:"GEN_ADVERTISERS" envDefault:"100"`
 	ClickRate     float64 `env:"GEN_CLICK_RATE" envDefault:"0.02"`
 	DuplicateRate float64 `env:"GEN_DUPLICATE_RATE" envDefault:"0"`
+	MetricsAddr   string  `env:"METRICS_ADDR_GENERATOR" envDefault:":2112"`
 }
 
 type Ingester struct {
@@ -50,6 +51,7 @@ type Ingester struct {
 	GroupID       string        `env:"KAFKA_GROUP_ID" envDefault:"ads-ingester"`
 	Redis         Redis         `envPrefix:"REDIS_"`
 	DedupTTL      time.Duration `env:"DEDUP_TTL" envDefault:"1h"`
+	MetricsAddr   string        `env:"METRICS_ADDR_INGESTER" envDefault:":2113"`
 }
 
 type ReportAPI struct {
@@ -91,6 +93,9 @@ func (c Generator) Validate() error {
 	if c.DuplicateRate < 0 || c.DuplicateRate > 1 {
 		errs = append(errs, errors.New("GEN_DUPLICATE_RATE must be in [0, 1]"))
 	}
+	if c.MetricsAddr == "" {
+		errs = append(errs, errors.New("METRICS_ADDR_GENERATOR is empty"))
+	}
 	return errors.Join(errs...)
 }
 
@@ -110,6 +115,9 @@ func (c Ingester) Validate() error {
 	}
 	if c.DedupTTL <= 0 {
 		errs = append(errs, errors.New("DEDUP_TTL must be > 0"))
+	}
+	if c.MetricsAddr == "" {
+		errs = append(errs, errors.New("METRICS_ADDR_INGESTER is empty"))
 	}
 	return errors.Join(errs...)
 }
