@@ -1,0 +1,31 @@
+groups:
+  - name: ads-pipeline
+    rules:
+      - alert: IngesterDown
+        expr: up{job="ingester"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "ingester dont response /metrics"
+      - alert: KafkaLagHigh
+        expr: sum(kafka_consumergroup_lag{consumergroup="ads-ingester"}) > 2000
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "consumer lag too big"
+      - alert: InsertErrors
+        expr: rate(ads_ingester_insert_errors_total{job="ingester"}[1m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "insert errors is big"
+      - alert: DLQNotEmpty
+        expr: increase(ads_ingester_dlq_total{job="ingester"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "dlq not empty"
