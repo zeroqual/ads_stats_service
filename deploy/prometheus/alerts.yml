@@ -2,40 +2,45 @@ groups:
   - name: ads-pipeline
     rules:
       - alert: IngesterDown
-        expr: up{job="ingester"} == 0
+        expr: absent(up{job="ingester"} == 1)
         for: 30s
         labels:
           severity: critical
         annotations:
-          summary: "ingester dont response /metrics"
+          summary: "No ingester instance is up"
+
       - alert: KafkaLagHigh
         expr: sum(kafka_consumergroup_lag{consumergroup="ads-ingester"}) > 2000
-        for: 30s
+        for: 1m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "consumer lag too big"
+          summary: "Consumer lag of ads-ingester is above 2000 messages"
+
       - alert: InsertErrors
-        expr: rate(ads_ingester_insert_errors_total{job="ingester"}[1m]) > 0
+        expr: sum(rate(ads_ingester_insert_errors_total{job="ingester"}[1m])) > 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "insert errors is big"
+          summary: "Ingester cannot insert into ClickHouse"
+
       - alert: DLQNotEmpty
-        expr: increase(ads_ingester_dlq_total{job="ingester"}[5m]) > 0
+        expr: sum(increase(ads_ingester_dlq_total{job="ingester"}[5m])) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "dlq not empty"
+          summary: "Bad messages were sent to the DLQ"
+
       - alert: ReportAPIDown
         expr: up{job="report-api"} == 0
         for: 30s
         labels:
           severity: critical
         annotations:
-          summary: "report-api is not responding on /metrics"
+          summary: "report-api is not responding"
+
       - alert: ReportAPIErrors
         expr: sum(rate(ads_api_requests_total{job="report-api", code=~"5.."}[5m])) > 0
         for: 1m

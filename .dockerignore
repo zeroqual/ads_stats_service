@@ -1,0 +1,10 @@
+.git
+.github
+.env
+*.exe
+*.test
+*.out
+deploy
+docs
+README.md
+docker-compose.yaml
