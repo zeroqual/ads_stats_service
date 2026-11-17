@@ -7,8 +7,9 @@
 
 Проект сделан как приближенный к продакшену pipeline: гарантия **at-least-once** без потерь при падениях, **дедупликация**, **DLQ** для битых сообщений, **метрики, дашборды и алерты**, тесты и CI.
 
-<!-- Добавьте скриншоты в docs/images/ — они показываются здесь -->
 ![Pipeline dashboard во время аварии ClickHouse](docs/images/pipeline-dashboard.png)
+
+![Pipeline dashboard после починки ClickHouse](docs/images/pipeline-dashboard2.png)
 
 ## Возможности
 
