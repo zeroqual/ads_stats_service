@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/zeroqual/ads_stats_service/internal/event"
-
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"github.com/zeroqual/ads_stats_service/internal/event"
 )
 
 type CHConnector struct {
@@ -62,6 +62,13 @@ func (c *CHConnector) Insert(ctx context.Context, events []event.Event) error {
 	err = batch.Send()
 	if err != nil {
 		return fmt.Errorf("failed to send batch: %w", err)
+	}
+	return nil
+}
+
+func (c *CHConnector) Ping(ctx context.Context) error {
+	if err := c.conn.Ping(ctx); err != nil {
+		return fmt.Errorf("ping clickhouse: %w", err)
 	}
 	return nil
 }

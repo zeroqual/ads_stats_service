@@ -56,8 +56,11 @@ type Ingester struct {
 
 type ReportAPI struct {
 	Base
-	ClickHouse ClickHouse `envPrefix:"CLICKHOUSE_"`
-	Addr       string     `env:"HTTP_ADDR" envDefault:":8080"`
+	ClickHouse   ClickHouse    `envPrefix:"CLICKHOUSE_"`
+	Redis        Redis         `envPrefix:"REDIS_"`
+	Addr         string        `env:"HTTP_ADDR" envDefault:":8080"`
+	CacheTTL     time.Duration `env:"CACHE_TTL" envDefault:"30s"`
+	QueryTimeout time.Duration `env:"QUERY_TIMEOUT" envDefault:"5s"`
 }
 
 // custom validate inside config.Load()
@@ -123,5 +126,18 @@ func (c Ingester) Validate() error {
 }
 
 func (c ReportAPI) Validate() error {
-	return nil
+	var errs []error
+	if c.Addr == "" {
+		errs = append(errs, errors.New("HTTP_ADDR is empty"))
+	}
+	if c.ClickHouse.Address == "" {
+		errs = append(errs, errors.New("CLICKHOUSE_ADDR is empty"))
+	}
+	if c.CacheTTL < 0 {
+		errs = append(errs, errors.New("CACHE_TTL must be >= 0 (0 disables cache)"))
+	}
+	if c.QueryTimeout <= 0 {
+		errs = append(errs, errors.New("QUERY_TIMEOUT must be > 0"))
+	}
+	return errors.Join(errs...)
 }

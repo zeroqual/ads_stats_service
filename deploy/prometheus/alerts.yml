@@ -29,3 +29,17 @@ groups:
           severity: warning
         annotations:
           summary: "dlq not empty"
+      - alert: ReportAPIDown
+        expr: up{job="report-api"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "report-api is not responding on /metrics"
+      - alert: ReportAPIErrors
+        expr: sum(rate(ads_api_requests_total{job="report-api", code=~"5.."}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "report-api returns 5xx"
