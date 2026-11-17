@@ -6,25 +6,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const metricsPath = "/metrics"
-
-var (
-	requestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "ads_api_requests_total",
-		Help: "HTTP requests by route and status code.",
-	}, []string{"method", "route", "code"})
-
-	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "ads_api_request_duration_seconds",
-		Help:    "HTTP request latency by route.",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14),
-	}, []string{"method", "route"})
-)
 
 func NewRouter(h *Handler, log *slog.Logger) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)

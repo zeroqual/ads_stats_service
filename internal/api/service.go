@@ -69,7 +69,9 @@ func (s *Service) Report(ctx context.Context, q storage.StatsQuery) (Report, boo
 	queryCtx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
 	defer cancel()
 
+	start := time.Now()
 	points, err := s.reader.Stats(queryCtx, q)
+	queryDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
 		return Report{}, false, fmt.Errorf("read stats: %w", err)
 	}
@@ -92,18 +94,22 @@ func (s *Service) fromCache(ctx context.Context, key string) (Report, bool) {
 
 	data, ok, err := s.cache.Get(ctx, key)
 	if err != nil {
+		cacheRequests.WithLabelValues(cacheError).Inc()
 		s.log.Warn("cache get failed, going to clickhouse", slog.Any("err", err))
 		return Report{}, false
 	}
 	if !ok {
+		cacheRequests.WithLabelValues(cacheMiss).Inc()
 		return Report{}, false
 	}
 
 	var rep Report
 	if err := json.Unmarshal(data, &rep); err != nil {
+		cacheRequests.WithLabelValues(cacheError).Inc()
 		s.log.Warn("cache entry is corrupted", slog.String("key", key), slog.Any("err", err))
 		return Report{}, false
 	}
+	cacheRequests.WithLabelValues(cacheHit).Inc()
 	return rep, true
 }
 
